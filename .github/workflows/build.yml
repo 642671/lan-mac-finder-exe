@@ -1,0 +1,57 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      LANMAC_PYTHON: python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip -r requirements-build.txt
+
+      - name: Test and build
+        shell: powershell
+        run: .\build.ps1
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanMacFinder-Windows-x64
+          path: |
+            release/*.zip
+            release/*.sha256
+            release/LanMacFinder.exe
+            release/selftest.json
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            release/*.zip `
+            release/*.sha256 `
+            release/LanMacFinder.exe `
+            release/selftest.json `
+            --generate-notes `
+            --title "LAN MAC Finder ${{ github.ref_name }}"

@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+release/
+.playwright-cli/
+*.log
+build-source-selftest*.json
