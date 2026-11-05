@@ -15,7 +15,10 @@ $ExePath = Join-Path $ReleaseDir "LanMacFinder.exe"
 Set-Location -LiteralPath $Root
 
 $PythonCommand = if ($env:LANMAC_PYTHON) { $env:LANMAC_PYTHON } else { "py" }
-$PythonPrefix = if ([IO.Path]::GetFileNameWithoutExtension($PythonCommand) -eq "py") { @("-3") } else { @() }
+$PythonPrefix = @()
+if ([IO.Path]::GetFileNameWithoutExtension($PythonCommand) -eq "py") {
+    $PythonPrefix = @("-3")
+}
 
 & $PythonCommand @PythonPrefix tools\generate_icon.py
 if ($LASTEXITCODE -ne 0) {
@@ -40,9 +43,9 @@ if (-not $SkipTests) {
         if ($LASTEXITCODE -ne 0) {
             throw "app.js syntax check failed"
         }
-        & node --test tests\test_csv_contract.js
+        & node --test tests\test_csv_contract.js tests\frontend_search_rounds.test.js
         if ($LASTEXITCODE -ne 0) {
-            throw "Frontend CSV tests failed"
+            throw "Frontend tests failed"
         }
     } else {
         Write-Warning "Node.js is unavailable; JavaScript checks were skipped."

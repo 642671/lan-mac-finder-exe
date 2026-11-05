@@ -23,6 +23,20 @@ class FrontendFeatureTests(unittest.TestCase):
         self.assertNotIn("heartbeat expired; closing local server", launcher)
         self.assertNotIn("last_heartbeat", server)
 
+    def test_bounded_polling_and_clickable_ip_contract(self) -> None:
+        script = (ROOT / "src" / "frontend" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "src" / "frontend" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn("var MAX_SEARCH_ROUNDS = 10", script)
+        self.assertIn("function registerSearchRound", script)
+        self.assertIn("scheduleRoundRestart", script)
+        self.assertIn("轮询查找结束", script)
+        self.assertIn("最终没有找到", script)
+        self.assertIn("function deviceWebUrl", script)
+        self.assertIn('target = "_blank"', script)
+        self.assertIn('rel = "noopener noreferrer"', script)
+        self.assertIn('closest(".ip-link")', script)
+        self.assertIn(".ip-link", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,8 +21,11 @@ var API_CANDIDATES = (function buildCandidates() {
 var API_ROOT = API_CANDIDATES[0];
 var apiReady = false;
 var pollTimer = null;
+var roundRestartTimer = null;
 var toastTimer = null;
 var activeTooltipTarget = null;
+var MAX_SEARCH_ROUNDS = 10;
+var SEARCH_RESTART_DELAY_MS = 1100;
 
 var state = {
   networks: [],
@@ -36,6 +39,10 @@ var state = {
   selectedKey: "",
   running: false,
   stopping: false,
+  searchActive: false,
+  searchExhausted: false,
+  searchRounds: 0,
+  lastRoundJobId: "",
   activeSuffix: "",
   normalizedSuffix: "",
   scanStatus: "idle",
@@ -70,6 +77,72 @@ function normalizeSuffix(value) {
     return "";
   }
   return text.replace(/[-:]/g, "").toUpperCase();
+}
+
+function deviceWebUrl(ip) {
+  var text = String(ip || "").trim();
+  var parts = text.split(".");
+  if (parts.length !== 4) {
+    return "";
+  }
+  for (var index = 0; index < parts.length; index += 1) {
+    if (!/^\d{1,3}$/.test(parts[index]) || Number(parts[index]) > 255) {
+      return "";
+    }
+  }
+  return "http://" + text + "/";
+}
+
+function isIpLinkTarget(target) {
+  return !!target &&
+    typeof target.closest === "function" &&
+    target.closest(".ip-link") !== null;
+}
+
+function searchRoundLabel() {
+  var current = Math.min(MAX_SEARCH_ROUNDS, state.searchRounds + 1);
+  return "第 " + current + " / " + MAX_SEARCH_ROUNDS + " 轮";
+}
+
+function searchExhaustedMessage() {
+  return "已完成 " + MAX_SEARCH_ROUNDS + " 轮轮询查找，最终没有找到 MAC 后缀 " +
+    state.activeSuffix + " 的设备。";
+}
+
+function registerSearchRound(jobId, resultCount) {
+  var key = String(jobId || "");
+  if (!state.searchActive || !key || key === state.lastRoundJobId) {
+    return {
+      changed: false,
+      rounds: state.searchRounds,
+      exhausted: false,
+      found: false
+    };
+  }
+  state.lastRoundJobId = key;
+  if (Number(resultCount) > 0) {
+    return {
+      changed: true,
+      rounds: state.searchRounds,
+      exhausted: false,
+      found: true
+    };
+  }
+  state.searchRounds += 1;
+  return {
+    changed: true,
+    rounds: state.searchRounds,
+    exhausted: state.searchRounds >= MAX_SEARCH_ROUNDS,
+    found: false
+  };
+}
+
+function resetSearchSession() {
+  state.searchActive = false;
+  state.searchExhausted = false;
+  state.searchRounds = 0;
+  state.lastRoundJobId = "";
+  clearRoundRestart();
 }
 
 function getCookie(name) {
@@ -425,20 +498,27 @@ function updateControls() {
   var exportButton = byId("exportButton");
   var inputClearButton = byId("inputClearButton");
   var input = byId("macSuffix");
+  var busy = state.running || state.searchActive;
 
-  scanButton.disabled = state.running || state.networks.length === 0;
-  stopButton.disabled = !state.running || state.stopping;
-  refreshButton.disabled = state.running;
-  emptyRefreshButton.disabled = state.running;
-  input.disabled = state.running;
-  inputClearButton.hidden = state.running || !input.value.trim();
+  scanButton.disabled = busy || state.networks.length === 0;
+  stopButton.disabled = !busy || state.stopping;
+  refreshButton.disabled = busy;
+  emptyRefreshButton.disabled = busy;
+  input.disabled = busy;
+  inputClearButton.hidden = busy || !input.value.trim();
   copyButton.disabled = !state.selectedMac;
   copyIpButton.disabled = !state.selectedIp;
   clearButton.disabled = state.tableMode !== "results" || state.results.length === 0;
-  exportButton.disabled = state.running || visibleTableRows().length === 0;
+  exportButton.disabled = busy || visibleTableRows().length === 0;
   setText(
     "scanButtonText",
-    state.running ? (state.stopping ? "停止中" : "扫描中") : "开始扫描"
+    state.stopping
+      ? "停止中"
+      : state.running
+        ? "轮询扫描中"
+        : state.searchActive
+          ? "轮询等待中"
+          : "开始扫描"
   );
 }
 
@@ -561,7 +641,19 @@ function renderTable(items, mode, force) {
     rangeCell.textContent = result.scan_range;
     var ipCell = document.createElement("td");
     ipCell.className = "mono-value";
-    ipCell.textContent = result.ip;
+    var ipUrl = deviceWebUrl(result.ip);
+    if (ipUrl) {
+      var ipLink = document.createElement("a");
+      ipLink.className = "ip-link";
+      ipLink.href = ipUrl;
+      ipLink.target = "_blank";
+      ipLink.rel = "noopener noreferrer";
+      ipLink.textContent = result.ip;
+      ipLink.title = "在新标签页打开 " + ipUrl;
+      ipCell.appendChild(ipLink);
+    } else {
+      ipCell.textContent = result.ip;
+    }
     var macCell = document.createElement("td");
     macCell.className = "mono-value";
     macCell.textContent = result.mac;
@@ -576,19 +668,26 @@ function renderTable(items, mode, force) {
     row.appendChild(ipCell);
     row.appendChild(macCell);
     row.appendChild(stateCell);
-    row.addEventListener("click", function () {
+    row.addEventListener("click", function (event) {
+      if (isIpLinkTarget(event.target)) {
+        return;
+      }
       selectRow(row);
     });
-    row.addEventListener("dblclick", function () {
+    row.addEventListener("dblclick", function (event) {
+      if (isIpLinkTarget(event.target)) {
+        return;
+      }
       selectRow(row);
       copySelectedMac();
     });
     row.addEventListener("keydown", function (event) {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        selectRow(row);
-        copySelectedMac();
+      if (event.key !== "Enter" || isIpLinkTarget(event.target)) {
+        return;
       }
+      event.preventDefault();
+      selectRow(row);
+      copySelectedMac();
     });
     body.appendChild(row);
   });
@@ -616,6 +715,36 @@ function renderEmptyForStatus(status) {
   if (state.tableMode === "devices") {
     setText("emptyTitle", "暂无设备记录");
     setText("emptyMessage", "当前邻居表中没有可显示的设备，刷新后再试。");
+    return;
+  }
+  if (state.searchExhausted) {
+    setText("emptyTitle", "轮询查找未找到");
+    setText("emptyMessage", searchExhaustedMessage());
+    return;
+  }
+  if (state.searchActive) {
+    if (status === "running") {
+      setText("emptyTitle", "正在轮询查找");
+      setText(
+        "emptyMessage",
+        searchRoundLabel() + "正在扫描 MAC 后缀 " + state.activeSuffix +
+          "，找到设备后会自动显示。"
+      );
+    } else if (status === "completed") {
+      setText("emptyTitle", "当前没有搜索到");
+      setText(
+        "emptyMessage",
+        "第 " + state.searchRounds + " / " + MAX_SEARCH_ROUNDS +
+          " 轮未发现 MAC 后缀 " + state.activeSuffix +
+          "，将自动开始下一轮搜索。"
+      );
+    } else {
+      setText("emptyTitle", "当前没有搜索到");
+      setText(
+        "emptyMessage",
+        "轮询查找 " + state.activeSuffix + " 时连接中断，请重试或停止搜索。"
+      );
+    }
     return;
   }
   if (status === "running") {
@@ -671,6 +800,26 @@ function renderScanStatus(data, notifyTerminal) {
   state.probedHosts = Number(data.probed_hosts) || 0;
   state.jobId = data.job_id || state.jobId;
 
+  var roundOutcome = null;
+  if (state.searchActive && !state.running && state.scanStatus === "completed") {
+    roundOutcome = registerSearchRound(
+      state.jobId,
+      Array.isArray(data.results) ? data.results.length : 0
+    );
+    if (roundOutcome.found || roundOutcome.exhausted) {
+      state.searchActive = false;
+      state.searchExhausted = roundOutcome.exhausted;
+      clearRoundRestart();
+    }
+  } else if (
+    state.searchActive &&
+    !state.running &&
+    state.scanStatus !== "completed"
+  ) {
+    state.searchActive = false;
+    clearRoundRestart();
+  }
+
   if (data.job_id || state.tableMode === "results") {
     renderResults(data.results || [], false);
   }
@@ -690,12 +839,14 @@ function renderScanStatus(data, notifyTerminal) {
       setProgress(percent, false, "正在探测主机并读取邻居表");
       setText(
         "resultSummary",
-        "正在匹配后缀 " + state.activeSuffix +
+        (state.searchActive ? searchRoundLabel() + " " : "") +
+          "正在匹配后缀 " + state.activeSuffix +
           "，已探测 " + state.probedHosts + " / " + state.totalHosts + " 台主机。"
       );
       setScanState(
         "running",
-        "正在扫描 " + (data.current_interface || ""),
+        (state.searchActive ? "轮询扫描中 · " : "正在扫描 ") +
+          (data.current_interface || ""),
         (data.current_range || "准备扫描") +
           " · 已探测 " + state.probedHosts + " 台主机。"
       );
@@ -703,7 +854,10 @@ function renderScanStatus(data, notifyTerminal) {
   } else if (state.scanStatus === "completed") {
     setProgress(100, false, "扫描完成");
     setHidden("scanProgress", true);
-    if (state.results.length) {
+    if (state.searchExhausted) {
+      setScanState("idle", "轮询查找结束", searchExhaustedMessage());
+      setText("resultSummary", searchExhaustedMessage());
+    } else if (state.results.length) {
       setScanState(
         "success",
         "扫描完成",
@@ -712,6 +866,18 @@ function renderScanStatus(data, notifyTerminal) {
       setText(
         "resultSummary",
         "后缀 " + state.activeSuffix + " 匹配到 " + state.results.length + " 台设备。"
+      );
+    } else if (state.searchActive) {
+      setScanState(
+        "success",
+        "当前没有搜索到",
+        "第 " + state.searchRounds + " / " + MAX_SEARCH_ROUNDS +
+          " 轮未发现后缀 " + state.activeSuffix + "，将自动开始下一轮搜索。"
+      );
+      setText(
+        "resultSummary",
+        "第 " + state.searchRounds + " / " + MAX_SEARCH_ROUNDS +
+          " 轮未找到后缀 " + state.activeSuffix + "，轮询搜索仍在进行。"
       );
     } else {
       setScanState(
@@ -777,22 +943,35 @@ function renderScanStatus(data, notifyTerminal) {
 
   if (notifyTerminal && wasRunning && !state.running && state.jobId) {
     if (state.scanStatus === "completed") {
-      toast(
-        state.results.length
-          ? "扫描完成，找到 " + state.results.length + " 条匹配记录。"
-          : "扫描完成，未找到匹配设备。",
-        false
-      );
+      if (state.searchExhausted) {
+        toast(searchExhaustedMessage(), false);
+      } else if (state.results.length) {
+        toast(
+          "扫描完成，找到 " + state.results.length + " 条匹配记录。",
+          false
+        );
+      } else if (!state.searchActive) {
+        toast("扫描完成，未找到匹配设备。", false);
+      }
     } else if (state.scanStatus === "stopped") {
       toast("扫描已停止。", false);
     } else if (state.scanStatus === "error") {
       toast(data.error || "扫描失败。", true);
     }
   }
+
+  if (
+    state.searchActive &&
+    !state.running &&
+    !state.stopping &&
+    state.scanStatus === "completed"
+  ) {
+    scheduleRoundRestart(SEARCH_RESTART_DELAY_MS);
+  }
 }
 
 async function refreshNetworks() {
-  if (state.running) {
+  if (state.running || state.searchActive) {
     return;
   }
   byId("refreshButton").disabled = true;
@@ -822,7 +1001,7 @@ async function refreshNetworks() {
     setScanState("error", "网段读取失败", describeError(error));
     toast(describeError(error), true);
   } finally {
-    byId("refreshButton").disabled = state.running;
+    byId("refreshButton").disabled = state.running || state.searchActive;
   }
 }
 
@@ -857,6 +1036,24 @@ function clearResultsForNewScan() {
   setText("resultSummary", "正在启动扫描。");
 }
 
+function clearRoundRestart() {
+  if (roundRestartTimer) {
+    window.clearTimeout(roundRestartTimer);
+    roundRestartTimer = null;
+  }
+}
+
+function scheduleRoundRestart(delay) {
+  clearRoundRestart();
+  if (!state.searchActive || state.running || state.stopping) {
+    return;
+  }
+  roundRestartTimer = window.setTimeout(function () {
+    roundRestartTimer = null;
+    launchScanRound();
+  }, delay || SEARCH_RESTART_DELAY_MS);
+}
+
 function scheduleScanPoll(delay) {
   if (pollTimer) {
     window.clearTimeout(pollTimer);
@@ -875,14 +1072,58 @@ async function pollScanStatus() {
   } catch (error) {
     state.running = false;
     state.stopping = false;
+    state.searchActive = false;
+    state.searchExhausted = false;
+    clearRoundRestart();
     updateControls();
     setScanState("error", "状态读取失败", describeError(error));
     toast(describeError(error), true);
   }
 }
 
+async function launchScanRound() {
+  if (!state.searchActive || state.running || state.stopping) {
+    return;
+  }
+  clearRoundRestart();
+  var round = state.searchRounds + 1;
+  state.running = true;
+  state.stopping = false;
+  state.scanStatus = "discovering";
+  renderResults([], true);
+  setProgress(0, true, "正在启动扫描");
+  setScanState(
+    "running",
+    "正在启动扫描 · 第 " + round + " / " + MAX_SEARCH_ROUNDS + " 轮",
+    "准备读取当前物理网段。"
+  );
+  setText(
+    "resultSummary",
+    "正在启动第 " + round + " / " + MAX_SEARCH_ROUNDS + " 轮搜索。"
+  );
+  updateControls();
+
+  try {
+    await apiRequest("scan/start", { suffix: state.normalizedSuffix });
+    scheduleScanPoll(350);
+  } catch (error) {
+    state.running = false;
+    state.stopping = false;
+    state.searchActive = false;
+    clearRoundRestart();
+    updateControls();
+    setHidden("scanProgress", true);
+    if (error.kind === "rejected") {
+      showInputError(error.detail || "MAC 后缀格式不正确。");
+    } else {
+      setScanState("error", "扫描启动失败", describeError(error));
+    }
+    toast(describeError(error), true);
+  }
+}
+
 async function startScan() {
-  if (state.running) {
+  if (state.running || state.searchActive) {
     return;
   }
   var displaySuffix = byId("macSuffix").value.trim();
@@ -896,34 +1137,37 @@ async function startScan() {
     return;
   }
 
-  state.running = true;
-  state.stopping = false;
+  resetSearchSession();
+  state.searchActive = true;
   state.activeSuffix = displaySuffix;
   state.normalizedSuffix = suffix;
-  state.scanStatus = "discovering";
+  state.jobId = "";
   clearResultsForNewScan();
-  setProgress(0, true, "正在启动扫描");
-  setScanState("running", "正在启动扫描", "准备读取当前物理网段。");
-  updateControls();
-
-  try {
-    await apiRequest("scan/start", { suffix: suffix });
-    scheduleScanPoll(350);
-  } catch (error) {
-    state.running = false;
-    updateControls();
-    setHidden("scanProgress", true);
-    if (error.kind === "rejected") {
-      showInputError(error.detail || "MAC 后缀格式不正确。");
-    } else {
-      setScanState("error", "扫描启动失败", describeError(error));
-    }
-    toast(describeError(error), true);
-  }
+  await launchScanRound();
 }
 
 async function stopScan() {
-  if (!state.running || state.stopping) {
+  var wasRunning = state.running;
+  if ((!wasRunning && !state.searchActive) || state.stopping) {
+    return;
+  }
+  state.searchActive = false;
+  state.searchExhausted = false;
+  clearRoundRestart();
+  if (!wasRunning) {
+    state.running = false;
+    state.stopping = false;
+    state.scanStatus = "stopped";
+    setHidden("scanProgress", true);
+    setScanState(
+      "idle",
+      "轮询搜索已停止",
+      "已保留停止前找到的 " + state.results.length + " 条记录。"
+    );
+    setText("resultSummary", "轮询搜索已停止，已有结果仍可选择和复制。");
+    renderEmptyForStatus("stopped");
+    updateControls();
+    toast("轮询搜索已停止。", false);
     return;
   }
   state.stopping = true;
@@ -933,6 +1177,7 @@ async function stopScan() {
     await apiRequest("scan/stop", {});
     scheduleScanPoll(250);
   } catch (error) {
+    state.running = false;
     state.stopping = false;
     updateControls();
     toast(describeError(error), true);
@@ -1005,12 +1250,14 @@ function exportCsv() {
 }
 
 async function clearResults() {
-  if (state.running) {
+  if (state.running || state.searchActive) {
     return;
   }
+  resetSearchSession();
   state.scanStatus = "idle";
   state.activeSuffix = "";
   state.normalizedSuffix = "";
+  state.jobId = "";
   byId("macSuffix").value = "";
   validateInput(false);
   state.results = [];
@@ -1129,8 +1376,14 @@ function bindEvents() {
   });
   input.addEventListener("input", function () {
     validateInput(true);
-    byId("inputClearButton").hidden = state.running || !input.value.trim();
-    if (!input.value.trim() && state.tableMode === "results" && !state.running) {
+    byId("inputClearButton").hidden =
+      state.running || state.searchActive || !input.value.trim();
+    if (
+      !input.value.trim() &&
+      state.tableMode === "results" &&
+      !state.running &&
+      !state.searchActive
+    ) {
       clearResults();
     }
   });
@@ -1168,7 +1421,7 @@ function bindEvents() {
     }
     if (event.key === "Escape") {
       hideTooltip();
-      if (state.running) {
+      if (state.running || state.searchActive) {
         event.preventDefault();
         stopScan();
       }
@@ -1186,6 +1439,12 @@ async function boot() {
     await refreshNetworks();
     try {
       var status = await apiRequest("scan/status", null);
+      if (status.running) {
+        state.searchActive = true;
+        state.searchExhausted = false;
+        state.searchRounds = 0;
+        state.lastRoundJobId = "";
+      }
       renderScanStatus(status, false);
       if (status.running) {
         scheduleScanPoll(350);

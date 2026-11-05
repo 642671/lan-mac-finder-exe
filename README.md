@@ -18,6 +18,10 @@ Python does not need to be installed.
   adapters.
 - Display the current Windows neighbor table as the default device overview.
 - Match `AA-BB`, `AA:BB`, and `AABB` suffixes case-insensitively.
+- Retry a search automatically up to 10 rounds when no device matches, then
+  stop and clearly report that the polling search ultimately found nothing.
+- Click any IP address in the device or match table to open `http://<ip>/` in
+  a new browser tab, without interfering with row selection or MAC copying.
 - Copy either the selected IP address or full MAC address.
 - Export the current device or match table to UTF-8 CSV for Excel.
 - Include the selected adapter's own MAC with a `LOCAL` state.
@@ -57,7 +61,7 @@ Outputs:
 
 ```text
 release\LanMacFinder.exe
-release\LanMacFinder-Windows-x64-1.1.0.zip
+release\LanMacFinder-Windows-x64-1.1.2.zip
 release\LanMacFinder.exe.sha256
 ```
 
@@ -66,6 +70,20 @@ Runtime logs are written under:
 ```text
 %LOCALAPPDATA%\LanMacFinder\logs\app.log
 ```
+
+## Version 1.1.2 feature update
+
+Version 1.1.2 adds bounded polling: a search that finds nothing retries
+automatically for at most 10 rounds, then stops with a clear final message.
+Device IP addresses are now links that open `http://<ip>/` in a new tab. The
+`1.1.1` startup-hang and memory fix is included.
+
+## Version 1.1.1 reliability fix
+
+Version 1.1.1 fixes a startup hang and memory spike caused by a Windows adapter
+reporting `0.0.0.0/0`. Network size is now checked without expanding the address
+range, and unusable local addresses are skipped before scanning. The 1.1.0
+long-running window fix remains included.
 
 ## Version 1.1.0 reliability fix
 

@@ -135,6 +135,27 @@ def network_hosts(network: ipaddress.IPv4Network) -> list[ipaddress.IPv4Address]
     return [network.network_address]
 
 
+def network_host_count(network: ipaddress.IPv4Network) -> int:
+    if network.prefixlen <= 30:
+        return max(0, network.num_addresses - 2)
+    if network.prefixlen == 31:
+        return 2
+    return 1
+
+
+def is_scannable_local_address(address: str) -> bool:
+    try:
+        parsed = ipaddress.IPv4Address(address)
+    except ValueError:
+        return False
+    return not (
+        parsed.is_unspecified
+        or parsed.is_loopback
+        or parsed.is_link_local
+        or parsed.is_multicast
+    )
+
+
 def _decode_output(raw: bytes) -> str:
     for encoding in ("utf-8-sig", "utf-16-le", "mbcs"):
         try:
@@ -374,6 +395,11 @@ def discover_networks(
             interface_index = int(entry["interface_index"])
             local_ip = str(entry["local_ip"])
             prefix_length = int(entry["prefix_length"])
+            if not is_scannable_local_address(local_ip):
+                warnings.append(
+                    f"{alias or 'unknown adapter'} 的 IPv4 地址 {local_ip} 不可扫描，已跳过"
+                )
+                continue
             network = parse_ipv4_network(local_ip, prefix_length)
         except (KeyError, TypeError, ValueError, CommandError) as exc:
             warnings.append(f"{alias or 'unknown adapter'}: {exc}")
@@ -381,10 +407,10 @@ def discover_networks(
         key = (interface_index, str(network))
         if key in seen:
             continue
-        hosts = network_hosts(network)
-        if len(hosts) > limit:
+        host_count = network_host_count(network)
+        if host_count > limit:
             warnings.append(
-                f"{alias} 的 {network} 包含 {len(hosts)} 台主机，"
+                f"{alias} 的 {network} 包含 {host_count} 台主机，"
                 f"超过安全上限 {limit}，已跳过"
             )
             continue
@@ -399,7 +425,7 @@ def discover_networks(
                 network=str(network.network_address),
                 broadcast=str(network.broadcast_address),
                 scan_range=str(network),
-                host_count=len(hosts),
+                host_count=host_count,
                 local_mac=normalize_mac(str(entry.get("local_mac") or "")) or "",
             )
         )
